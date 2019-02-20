@@ -6,9 +6,13 @@
 //  alertの参考(https://gist.github.com/AppleEducate/61644b890890ffc08852c2d3805e2f87#file-uialertcontroller-swift-L84)
 
 import UIKit
+import EventKit
+import EventKitUI
 
 // UITableViewDataSource, UITableViewDelegateのプロトコルを実装する宣言
-class ViewController: UIViewController, UITableViewDataSource, UITableViewDelegate {
+class ViewController: UIViewController, UITableViewDataSource, UITableViewDelegate, EKEventEditViewDelegate, UINavigationControllerDelegate {
+    private let eventStore: EKEventStore = EKEventStore()
+    
 //    テーブルの行数を返却するメソッドの実装
     func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
 //        ToDoの配列の長さを返却する
@@ -113,46 +117,115 @@ class ViewController: UIViewController, UITableViewDataSource, UITableViewDelega
 //    ＋ボタンタップ時の動作
 //    alertダイアログ生成、テキストエリアの追加、OK/CENCEL時の動作
     @IBAction func tapAddButton(_ sender: Any) {
-//        アラートダイアログの生成
-        let alertController = UIAlertController(title: "ToDo追加", message: "ToDoを入力してください", preferredStyle: UIAlertController.Style.alert)
+//        EventKit用変数
+        let title: String = "ToDo"
+        let location: String = "場所"
+        let startDate: Date = Date()
+        let endDate: Date = startDate.addingTimeInterval(3600 * 3)
+        let memo: String = "詳細内容"
+        let timeZone: TimeZone = TimeZone(identifier: "Asia/Tokyo")!
         
-//        テキストエリアの追加
-        alertController.addTextField(configurationHandler: nil)
-//        OKボタン追加
-        let okAction = UIAlertAction(title: "OK", style: UIAlertAction.Style.default) { (action: UIAlertAction) in
-//            OKボタンタップ時の処理
-            if let textField = alertController.textFields?.first {
-//                textFieldsから最初の文字列を取得（今回は一つしかないが・・・）
-//                ToDoの配列に入力値を挿入。先頭に挿入する
-                let myTodo = MyTodo()
-                myTodo.todoTitle = textField.text!
-                self.todoList.insert(myTodo, at: 0)
-//                行が追加されたことをテーブルに通知する
-//                ->テーブルの再描画が実行される
-                self.tableView.insertRows(at: [IndexPath(row: 0, section: 0)], with: UITableView.RowAnimation.right)
-                
-//                ToDoの保存処理
-                let userDefaults = UserDefaults.standard
-//                Data型にシリアライズ
-                do {
-                    let data = try NSKeyedArchiver.archivedData(withRootObject: self.todoList, requiringSecureCoding: true)
-                    userDefaults.set(data, forKey: "todoList")
-                    userDefaults.synchronize()
-                } catch {
-//                    今回エラー処理はスキップ
+        self.showCalendarView(title: title, location: location, startDate: startDate, endDate: endDate, memo: memo, timeZone: timeZone)
+    }
+    
+    // イベントへのアクセス権限で振り分け
+    func showCalendarView(title: String, location: String?, startDate: Date, endDate: Date, memo: String?, timeZone: TimeZone) {
+        
+        //  権限チェック
+        let authStatus = EKEventStore.authorizationStatus(for: .event)
+        
+        switch authStatus {
+        case .authorized:
+            self.openCalendarView(title: title, location: location, startDate: startDate, endDate: endDate, memo: memo, timeZone: timeZone)
+        case .restricted: break
+        case .notDetermined:
+            self.eventStore.requestAccess(to: .event, completion: { (result: Bool, error: Error?) in
+                if result {
+                    self.openCalendarView(title: title, location: location, startDate: startDate, endDate: endDate, memo: memo, timeZone: timeZone)
+                } else {
+                    //                使用不可
                 }
-            }
+            })
+        case .denied: break
         }
-//        OKボタンがタップされたときの動作
-        alertController.addAction(okAction)
-//        CANCELボタンがタップされたときの動作
-        let cancelButton = UIAlertAction(title: "CANCEL", style: UIAlertAction.Style.cancel, handler: nil)
-//        CANCELボタンを追加
-        alertController.addAction(cancelButton)
-//        アラートダイアログの表示
-        present(alertController, animated: true, completion: nil)
+    }
+    
+    //  イベント作成画面表示
+    func openCalendarView(title: String, location: String?, startDate: Date, endDate: Date, memo: String?, timeZone: TimeZone) {
+        let event: EKEvent = EKEvent(eventStore: self.eventStore)
+        event.title = title
+        event.location = location
+        event.startDate = startDate
+        event.endDate = endDate
+        event.notes = memo
+        event.timeZone = timeZone
+        event.calendar = self.eventStore.defaultCalendarForNewEvents
+        
+        
+        let eventController: EKEventEditViewController = EKEventEditViewController()
+        eventController.delegate = self
+        eventController.event = event
+        eventController.editViewDelegate = self
+        eventController.eventStore = self.eventStore
+        
+        self.present(eventController, animated: true, completion: nil)
     }
 
+//    イベント画面用デリゲート
+    func eventEditViewController(_ controller: EKEventEditViewController, didCompleteWith action: EKEventEditViewAction) {
+        var result = -1
+        
+//        ここでもうToDoに入れちゃう？
+        let myTodo = MyTodo()
+        myTodo.todoTitle = controller.event?.title
+        self.todoList.insert(myTodo, at: 0)
+//        メインスレッドで、行が追加されたことをテーブルに通知する
+//        ->テーブルの再描画が実行される
+        DispatchQueue.main.async {
+            self.tableView.insertRows(at: [IndexPath(row: 0, section: 0)], with: UITableView.RowAnimation.right)
+        }
+//                ToDoの保存処理
+        let userDefaults = UserDefaults.standard
+//                Data型にシリアライズ
+        do {
+            let data = try NSKeyedArchiver.archivedData(withRootObject: todoList, requiringSecureCoding: true)
+            userDefaults.set(data, forKey: "todoList")
+            userDefaults.synchronize()
+        } catch {
+//                    今回エラー処理はスキップ
+        }
+        
+        switch action {
+        case .canceled: break
+        case .saved:
+            do {
+                try controller.eventStore.save(controller.event!, span: .thisEvent)
+                
+//                正常終了
+                result = 1
+            } catch {
+//                失敗
+                result = 9
+            }
+        case .deleted: break
+        }
+        
+        controller.dismiss(animated: true) {
+            var message = ""
+            if result != -1 {
+                if result == 1{
+                    message = "イベント追加　完了"
+                } else if result == 9 {
+                    message = "イベント追加　失敗"
+                }
+                
+//                結果の表示
+                let alert = UIAlertController(title: "Result", message: message, preferredStyle: .alert)
+                alert.addAction(UIAlertAction(title: "OK", style: .default, handler: nil))
+                self.present(alert, animated: true, completion: nil)
+            }
+        }
+    }
 }
 
 // 独自クラスをシリアライズする際には、NSObjectを継承し、
